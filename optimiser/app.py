@@ -250,7 +250,7 @@ def prepare_contribution_impression_dict(master_df, google_trends_value, beta_df
     return impression_dict
 
 
-def run_optimization(master_df, beta_df, constraint_pct=None, constraint_absolute=None, constraint_type="percentage", google_trends_value=50.0, modeling_data_df=None):
+def run_optimization(master_df, beta_df, constraint_pct=None, constraint_absolute=None, constraint_type="percentage", google_trends_value=50.0, modeling_data_df=None, increased_total_budget=None):
     """Run the complete optimization pipeline with percentage or absolute budget constraints."""
     try:
         # Budget file now has "Other Products" directly, no catalog campaign
@@ -373,8 +373,11 @@ def run_optimization(master_df, beta_df, constraint_pct=None, constraint_absolut
             upper_pct = 1.0 + (constraint_pct / 100.0)
             bounds = create_bounds(base_budgets, lower_pct=lower_pct, upper_pct=upper_pct)
         
-        # Add constraint to keep total budget constant
-        total_budget = base_budgets.sum()
+        # Add constraint to keep total budget constant (or use increased budget if specified)
+        if increased_total_budget is not None:
+            total_budget = increased_total_budget
+        else:
+            total_budget = base_budgets.sum()
         constraints = {'type': 'eq', 'fun': lambda x: x.sum() - total_budget}
         
         result = optimize_budgets(objective_fn, base_budgets, bounds, constraints)
@@ -530,24 +533,23 @@ def main():
         return
     
     # Load files
-    with st.spinner("Loading data files..."):
-        data_files = load_and_validate_files(budget_file, cpm_file, beta_file, None, price_file, google_trends_file)
+    data_files = load_and_validate_files(budget_file, cpm_file, beta_file, None, price_file, google_trends_file)
         
-        # Load modeling data if provided
-        if modeling_data_file is not None:
-            try:
-                if isinstance(modeling_data_file, str):
-                    # It's a file path
-                    modeling_data_df = pd.read_excel(modeling_data_file, engine='openpyxl')
-                else:
-                    # It's an uploaded file
-                    modeling_data_df = pd.read_csv(modeling_data_file) if modeling_data_file.name.endswith('.csv') else pd.read_excel(modeling_data_file, engine='openpyxl')
-                data_files['modeling_data'] = modeling_data_df
-            except Exception as e:
-                st.warning(f"⚠️ Could not load modeling data: {str(e)}")
-                data_files['modeling_data'] = None
-        else:
+    # Load modeling data if provided
+    if modeling_data_file is not None:
+        try:
+            if isinstance(modeling_data_file, str):
+                # It's a file path
+                modeling_data_df = pd.read_excel(modeling_data_file, engine='openpyxl')
+            else:
+                # It's an uploaded file
+                modeling_data_df = pd.read_csv(modeling_data_file) if modeling_data_file.name.endswith('.csv') else pd.read_excel(modeling_data_file, engine='openpyxl')
+            data_files['modeling_data'] = modeling_data_df
+        except Exception as e:
+            st.warning(f"⚠️ Could not load modeling data: {str(e)}")
             data_files['modeling_data'] = None
+    else:
+        data_files['modeling_data'] = None
     
     if data_files is None:
         return
@@ -567,7 +569,7 @@ def main():
         st.session_state.constraint_absolute = 5000
     
     # ========== MAIN TABS ==========
-    tab1, tab2, tab3, tab4 = st.tabs(["⚙️ Configuration", "📈 Results", "📊 Contribution Analysis", "💰 Pricing Strategy"])
+    tab1, tab2, tab3 = st.tabs(["⚙️ Configuration", "📈 Results", "📊 Contribution Analysis"])
     
     # ========== TAB 1: CONFIGURATION ==========
     with tab1:
@@ -621,10 +623,6 @@ def main():
         #     use_wide_bounds_ui = st.checkbox("🔓 Use Wide Bounds (0.1x-10x)", value=False, 
         #                                     help="Wide bounds allow larger budget reallocations for better optimization. Recommended!")
         #     st.session_state.use_wide_bounds = use_wide_bounds_ui
-        
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-        with col_btn1:
-            run_btn = st.button("🚀 Run Optimization", type="primary", use_container_width=True, key="run_opt_btn")
         
         # Budget and CPM Editor Side by Side
         master_df_temp = prepare_master_dataframe(
@@ -1308,6 +1306,33 @@ def main():
             else:
                 st.warning("⚠️ Please upload modeling data file to see this table")
         
+        # Budget Increase Option
+        st.markdown("---")
+        st.markdown("### 📈 Budget Adjustment (Optional)")
+        col_increase1, col_increase2 = st.columns([2, 1])
+        with col_increase1:
+            budget_increase_pct = st.slider(
+                "Increase Total Budget by:",
+                min_value=0,
+                max_value=50,
+                value=0,
+                step=5,
+                format="%d%%",
+                help="Increase the total budget and see where the optimizer allocates the extra funds"
+            )
+        with col_increase2:
+            if budget_increase_pct > 0 and 'edited_budgets' in st.session_state:
+                current_total = st.session_state.edited_budgets['base_budget'].sum()
+                new_total = current_total * (1 + budget_increase_pct / 100)
+                st.metric("New Total Budget", f"${new_total:,.2f}", delta=f"+${new_total - current_total:,.2f}")
+        
+        st.markdown("---")
+        
+        # Run Optimization Button
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
+        with col_btn1:
+            run_btn = st.button("🚀 Run Optimization", type="primary", use_container_width=True, key="run_opt_btn")
+        
         if run_btn:
             # Run optimization and store in session state
             with st.spinner("Optimizing for maximum revenue..."):
@@ -1325,6 +1350,21 @@ def main():
                             new_budget = row['base_budget']
                             master_df_temp.loc[master_df_temp['item_name'] == item_name, 'base_budget'] = new_budget
                     
+                    # Apply budget increase if specified
+                    if budget_increase_pct > 0:
+                        current_total = master_df_temp['base_budget'].sum()
+                        new_total = current_total * (1 + budget_increase_pct / 100)
+                        # Store the increased budget for constraint
+                        st.session_state.increased_total_budget = new_total
+                        st.session_state.budget_increase_pct = budget_increase_pct
+                        st.info(f"💰 Running TWO optimizations to compare: (1) No increase, (2) With {budget_increase_pct}% increase")
+                        
+                        # Run baseline optimization first (no increase)
+                        st.info("🔄 Step 1/2: Optimizing with current budget...")
+                    else:
+                        st.session_state.increased_total_budget = None
+                        st.session_state.budget_increase_pct = 0
+                    
                     # Use edited CPMs if available
                     if 'edited_cpms' in st.session_state:
                         # Update master_df with edited CPMs
@@ -1340,6 +1380,31 @@ def main():
                     constraint_pct_val = st.session_state.get('constraint_pct', 25)
                     constraint_absolute_val = st.session_state.get('constraint_absolute', None)
                     
+                    # If budget increase, run baseline first
+                    if budget_increase_pct > 0:
+                        # Run baseline optimization (no increase)
+                        baseline_result = run_optimization(
+                            master_df_temp, 
+                            data_files['beta'], 
+                            constraint_pct=constraint_pct_val,
+                            constraint_absolute=constraint_absolute_val,
+                            constraint_type=constraint_type,
+                            google_trends_value=google_trends_value, 
+                            modeling_data_df=data_files.get('modeling_data'),
+                            increased_total_budget=None  # No increase for baseline
+                        )
+                        
+                        if baseline_result is not None:
+                            st.session_state.baseline_optimization = baseline_result
+                            st.success("✅ Step 1/2 Complete: Baseline optimization done")
+                            st.info(f"🔄 Step 2/2: Optimizing with {budget_increase_pct}% budget increase...")
+                        else:
+                            st.error("❌ Baseline optimization failed")
+                            return
+                    else:
+                        st.session_state.baseline_optimization = None
+                    
+                    # Run main optimization (with or without increase)
                     result_temp = run_optimization(
                         master_df_temp, 
                         data_files['beta'], 
@@ -1347,12 +1412,16 @@ def main():
                         constraint_absolute=constraint_absolute_val,
                         constraint_type=constraint_type,
                         google_trends_value=google_trends_value, 
-                        modeling_data_df=data_files.get('modeling_data')
+                        modeling_data_df=data_files.get('modeling_data'),
+                        increased_total_budget=st.session_state.get('increased_total_budget')
                     )
                     
                     if result_temp is not None:
                         st.session_state.optimization_result = result_temp
-                        st.success("✅ Optimization Complete! 👉 Go to the **Results** tab to view your optimized budget allocation")
+                        if budget_increase_pct > 0:
+                            st.success("✅ Both optimizations complete! 👉 Go to **Results** tab to see the comparison")
+                        else:
+                            st.success("✅ Optimization Complete! 👉 Go to the **Results** tab to view your optimized budget allocation")
                         # st.balloons()
                     else:
                         st.error("❌ Optimization failed. Please check your data and try again.")
@@ -1478,6 +1547,124 @@ def main():
             use_container_width=True,
             height=600
         )
+        
+        # Show budget increase comparison if applicable
+        if st.session_state.get('baseline_optimization') is not None and st.session_state.get('increased_total_budget') is not None:
+            st.markdown("---")
+            st.markdown("### 💡 Budget Increase Impact Analysis")
+            
+            baseline = st.session_state.baseline_optimization
+            increased = result
+            
+            budget_increase_pct = st.session_state.get('budget_increase_pct', 0)
+            extra_budget = increased['optimized_budgets'].sum() - baseline['optimized_budgets'].sum()
+            
+            st.info(f"📊 Comparing optimization WITH vs WITHOUT {budget_increase_pct}% budget increase (${extra_budget:,.2f} extra)")
+            
+            # Create comparison showing the DIFFERENCE due to budget increase
+            comparison_data = []
+            for i, item_name in enumerate(result['item_names']):
+                baseline_opt = baseline['optimized_budgets'][i]
+                increased_opt = increased['optimized_budgets'][i]
+                difference = increased_opt - baseline_opt
+                
+                comparison_data.append({
+                    'Item': item_name,
+                    'Baseline Optimized': baseline_opt,
+                    'With Increase Optimized': increased_opt,
+                    'Extra Allocation': difference
+                })
+            
+            diff_df = pd.DataFrame(comparison_data)
+            diff_df = diff_df.sort_values('Extra Allocation', ascending=False)
+            
+            # Show detailed comparison table
+            st.markdown("#### 📊 Detailed Comparison Table")
+            st.caption("Compare baseline optimization vs optimization with budget increase")
+            
+            # Color code the Extra Allocation column
+            def color_extra_allocation(val):
+                if pd.isna(val):
+                    return 'background-color: white'
+                elif val > 0:
+                    intensity = min(abs(val) / 5000, 1.0)
+                    green = int(144 - (144 - 34) * intensity)
+                    return f'background-color: rgb({green}, 238, {green}); color: black'
+                elif val < 0:
+                    intensity = min(abs(val) / 5000, 1.0)
+                    green_blue = int(182 - (182 - 20) * intensity)
+                    return f'background-color: rgb(255, {green_blue}, {green_blue}); color: black'
+                else:
+                    return 'background-color: #e0e0e0; color: black'
+            
+            st.dataframe(
+                diff_df.style.format({
+                    'Baseline Optimized': lambda x: f"${x:,.2f}",
+                    'With Increase Optimized': lambda x: f"${x:,.2f}",
+                    'Extra Allocation': lambda x: f"${x:,.2f}"
+                }).applymap(color_extra_allocation, subset=['Extra Allocation']),
+                use_container_width=True,
+                height=400
+            )
+            
+            st.markdown("---")
+            
+            # Show where extra budget went - Two column layout
+            st.markdown("#### 🎯 Where the Extra Budget Went")
+            st.caption("This shows ONLY the difference caused by the budget increase")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("##### 📈 Got More Budget")
+                gainers = diff_df[diff_df['Extra Allocation'] > 0].copy()
+                if len(gainers) > 0:
+                    total_gains = gainers['Extra Allocation'].sum()
+                    st.caption(f"Total extra allocated: ${total_gains:,.2f}")
+                    
+                    for idx, row in gainers.iterrows():
+                        col_a, col_b, col_c = st.columns([3, 2, 2])
+                        with col_a:
+                            st.write(f"**{row['Item']}**")
+                        with col_b:
+                            st.write(f"✅ ${row['Extra Allocation']:,.2f}")
+                        with col_c:
+                            pct = (row['Extra Allocation'] / extra_budget * 100) if extra_budget > 0 else 0
+                            st.write(f"{pct:.1f}%")
+                else:
+                    st.write("None")
+            
+            with col2:
+                st.markdown("##### 📉 Got Less Budget")
+                losers = diff_df[diff_df['Extra Allocation'] < 0].copy()
+                if len(losers) > 0:
+                    total_losses = abs(losers['Extra Allocation'].sum())
+                    st.caption(f"Total reduced: ${total_losses:,.2f}")
+                    
+                    for idx, row in losers.iterrows():
+                        col_a, col_b = st.columns([3, 2])
+                        with col_a:
+                            st.write(f"**{row['Item']}**")
+                        with col_b:
+                            st.write(f"❌ ${row['Extra Allocation']:,.2f}")
+                else:
+                    st.write("None")
+            
+            # Summary
+            st.markdown("---")
+            st.markdown("#### 📊 Summary")
+            col_sum1, col_sum2, col_sum3 = st.columns(3)
+            with col_sum1:
+                total_gains = gainers['Extra Allocation'].sum() if len(gainers) > 0 else 0
+                st.metric("Total Gains", f"${total_gains:,.2f}")
+            with col_sum2:
+                total_losses = abs(losers['Extra Allocation'].sum()) if len(losers) > 0 else 0
+                st.metric("Total Losses", f"${total_losses:,.2f}")
+            with col_sum3:
+                net = total_gains - total_losses
+                st.metric("Net (Extra Budget)", f"${net:,.2f}")
+            
+            st.caption("💡 This shows the pure impact of adding extra budget")
         
         # Product-Specific Beta & Budget Analysis Expander
         with st.expander("🔍 View Variables & Betas for Specific Product"):
@@ -3361,8 +3548,9 @@ Where:
                         import traceback
                         st.code(traceback.format_exc())
     
-    # ========== TAB 4: PRICING STRATEGY ==========
-    with tab4:
+    # ========== TAB 4: PRICING STRATEGY (HIDDEN) ==========
+    if False:  # Hidden - Pricing Strategy tab
+        pass  # with tab4:
         st.markdown("### 💰 Price Elasticity Analysis")
         st.info("Analyze how price changes affect demand and revenue for each product using the Product Variant Price beta coefficient")
         
